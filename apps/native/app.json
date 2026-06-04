@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "FLYE ARCADE",
+    "slug": "flye-arcade",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#050510"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#050510"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}

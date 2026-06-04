@@ -1,0 +1,13 @@
+node_modules
+.DS_Store
+coverage
+dist
+.vite
+.expo
+.expo-shared
+apps/desktop/src-tauri/target
+apps/desktop/src-tauri/gen
+apps/web/.vercel
+.env
+.env.*
+npm-debug.log*

@@ -1,0 +1,19 @@
+{
+  "name": "flye-arcade",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/web",
+    "apps/native"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace @flye-arcade/web",
+    "build:web": "npm run build --workspace @flye-arcade/web",
+    "dev:native": "npm run dev --workspace @flye-arcade/native",
+    "lint": "npm run lint --workspace @flye-arcade/web",
+    "format": "prettier --write ."
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
