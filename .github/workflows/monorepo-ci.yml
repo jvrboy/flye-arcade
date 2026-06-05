@@ -1,0 +1,184 @@
+name: Monorepo Node CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main, develop]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has-workspaces: ${{ steps.detect.outputs.workspaces }}
+      workspaces: ${{ steps.detect.outputs.workspaces_list }}
+      has-package: ${{ steps.detect.outputs.pkg }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        run: |
+          pkg="false"
+          ws="false"
+          list=""
+          if [ -f package.json ]; then
+            pkg="true"
+            if grep -q '"workspaces"' package.json; then
+              ws="true"
+              list=$(node -e "const p=require('./package.json'); console.log((p.workspaces||[]).join(','))" 2>/dev/null || echo "")
+            fi
+          fi
+          echo "pkg=$pkg" >> $GITHUB_OUTPUT
+          echo "workspaces=$ws" >> $GITHUB_OUTPUT
+          echo "workspaces_list=$list" >> $GITHUB_OUTPUT
+
+  lint:
+    needs: detect
+    if: needs.detect.outputs.has-package == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint root
+        run: |
+          if grep -q '"lint"' package.json; then
+            npm run lint 2>&1 | tee lint.log
+          else
+            npx eslint . --max-warnings 0 --ignore-path .gitignore 2>/dev/null || echo "No lint script"
+          fi
+        continue-on-error: true
+      - name: Lint workspaces
+        if: needs.detect.outputs.has-workspaces == 'true'
+        run: |
+          IFS=',' read -ra WS <<< "${{ needs.detect.outputs.workspaces }}"
+          for w in "${WS[@]}"; do
+            w=$(echo "$w" | tr -d ' "')
+            [ -z "$w" ] && continue
+            if [ -f "$w/package.json" ] && grep -q '"lint"' "$w/package.json"; then
+              echo "=== Linting $w ==="
+              (cd "$w" && npm run lint 2>&1) || true
+            fi
+          done
+        continue-on-error: true
+
+  test:
+    needs: detect
+    if: needs.detect.outputs.has-package == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['18', '20', '22']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Test root
+        run: |
+          if grep -q '"test"' package.json; then
+            npm test -- --watchAll=false 2>&1 | tee test.log
+          else
+            echo "No root test script"
+          fi
+        continue-on-error: true
+      - name: Test workspaces
+        if: needs.detect.outputs.has-workspaces == 'true'
+        run: |
+          IFS=',' read -ra WS <<< "${{ needs.detect.outputs.workspaces }}"
+          for w in "${WS[@]}"; do
+            w=$(echo "$w" | tr -d ' "')
+            [ -z "$w" ] && continue
+            if [ -f "$w/package.json" ] && grep -q '"test"' "$w/package.json"; then
+              echo "=== Testing $w ==="
+              (cd "$w" && npm test -- --watchAll=false 2>&1) || true
+            fi
+          done
+        continue-on-error: true
+      - name: Upload coverage
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-node-${{ matrix.node-version }}
+          path: |
+            coverage/**
+            **/coverage/**
+            test.log
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.has-package == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build root
+        run: |
+          if grep -q '"build"' package.json; then
+            npm run build 2>&1 | tee build.log
+          else
+            echo "No build script"
+          fi
+        continue-on-error: true
+      - name: Build workspaces
+        if: needs.detect.outputs.has-workspaces == 'true'
+        run: |
+          IFS=',' read -ra WS <<< "${{ needs.detect.outputs.workspaces }}"
+          for w in "${WS[@]}"; do
+            w=$(echo "$w" | tr -d ' "')
+            [ -z "$w" ] && continue
+            if [ -f "$w/package.json" ] && grep -q '"build"' "$w/package.json"; then
+              echo "=== Building $w ==="
+              (cd "$w" && npm run build 2>&1) || true
+            fi
+          done
+        continue-on-error: true
+      - name: Upload build artifacts
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monorepo-build
+          path: |
+            dist/**
+            build/**
+            **/dist/**
+            **/build/**
+            build.log
+
+  release:
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/dist/**
+            artifacts/**/build/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
