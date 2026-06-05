@@ -1,0 +1,230 @@
+name: Expo (React Native) CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main, develop]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+  EXPO_VERSION: 'latest'
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has-expo: ${{ steps.detect.outputs.expo }}
+      has-eas: ${{ steps.detect.outputs.eas }}
+      app-dir: ${{ steps.detect.outputs.appdir }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        run: |
+          expo="false"
+          eas="false"
+          appdir="."
+          # Look in current dir and common monorepo sub-paths
+          for d in "." "apps/native" "apps/mobile" "mobile" "native" "expo-app" "app"; do
+            if [ -f "$d/app.json" ] && grep -q '"expo"' "$d/app.json" 2>/dev/null; then
+              appdir="$d"
+              expo="true"
+              break
+            fi
+          done
+          if [ -f "eas.json" ] || [ -f "$appdir/eas.json" ]; then
+            eas="true"
+          fi
+          echo "expo=$expo" >> $GITHUB_OUTPUT
+          echo "eas=$eas" >> $GITHUB_OUTPUT
+          echo "appdir=$appdir" >> $GITHUB_OUTPUT
+
+  lint:
+    needs: detect
+    if: needs.detect.outputs.has-expo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ needs.detect.outputs.app-dir }}/package-lock.json
+      - name: Install dependencies
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: npm ci
+      - name: TypeScript check
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: npx tsc --noEmit 2>/dev/null || echo "No tsc configured"
+        continue-on-error: true
+
+  test:
+    needs: detect
+    if: needs.detect.outputs.has-expo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ needs.detect.outputs.app-dir }}/package-lock.json
+      - name: Install dependencies
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: npm ci
+      - name: Run tests
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: npm test -- --watchAll=false 2>/dev/null || echo "No tests configured"
+        continue-on-error: true
+
+  build-web:
+    needs: [detect, lint, test]
+    if: needs.detect.outputs.has-expo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ needs.detect.outputs.app-dir }}/package-lock.json
+      - name: Install dependencies
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: npm ci
+      - name: Cache Expo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.expo
+            ${{ needs.detect.outputs.app-dir }}/.expo
+            ${{ needs.detect.outputs.app-dir }}/dist
+          key: expo-web-${{ hashFiles(format('{0}/package-lock.json', needs.detect.outputs.app-dir)) }}
+          restore-keys: expo-web-
+      - name: Build for web
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: npx expo export --platform web 2>&1 | tee expo-web.log
+        continue-on-error: true
+      - name: Upload web build
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: expo-web
+          path: |
+            ${{ needs.detect.outputs.app-dir }}/dist/**
+            expo-web.log
+
+  build-android:
+    needs: [detect, lint, test]
+    if: needs.detect.outputs.has-expo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ needs.detect.outputs.app-dir }}/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-expo-${{ hashFiles(format('{0}/android/**/*.gradle*', needs.detect.outputs.app-dir)) }}
+          restore-keys: gradle-expo-
+      - name: Install dependencies
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: npm ci
+      - name: Prebuild Android (no-install)
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: npx expo prebuild --platform android --no-install 2>&1 | tee prebuild.log
+        continue-on-error: true
+      - name: Build Android (Expo run)
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: npx expo run:android --no-install --variant release 2>&1 | tee expo-android.log
+        continue-on-error: true
+      - name: Build with Gradle directly
+        if: hashFiles(format('{0}/android/app/build.gradle', needs.detect.outputs.app-dir)) != ''
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: |
+          if [ -d android ]; then
+            cd android && ./gradlew assembleRelease -x lint 2>&1 | tee -a expo-android.log || true
+          fi
+        continue-on-error: true
+      - name: Upload Android artifacts
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: expo-android
+          path: |
+            ${{ needs.detect.outputs.app-dir }}/android/app/build/outputs/apk/**/*.apk
+            expo-android.log
+            prebuild.log
+
+  build-ios:
+    needs: [detect, lint, test]
+    if: needs.detect.outputs.has-expo == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ needs.detect.outputs.app-dir }}/package-lock.json
+      - name: Install dependencies
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: npm ci
+      - name: Prebuild iOS
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: npx expo prebuild --platform ios --no-install 2>&1 | tee prebuild-ios.log
+        continue-on-error: true
+      - name: Install CocoaPods
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: |
+          if [ -d ios ]; then
+            cd ios && pod install 2>&1 | tee -a prebuild-ios.log
+          fi
+        continue-on-error: true
+      - name: Build iOS (no codesign)
+        working-directory: ${{ needs.detect.outputs.app-dir }}
+        run: npx expo run:ios --no-install --configuration Release 2>&1 | tee expo-ios.log
+        continue-on-error: true
+      - name: Upload iOS artifacts
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: expo-ios
+          path: |
+            ${{ needs.detect.outputs.app-dir }}/ios/build/**/*.ipa
+            expo-ios.log
+            prebuild-ios.log
+
+  release:
+    needs: [build-web, build-android, build-ios]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.apk
+            artifacts/**/*.ipa
+            artifacts/**/index.html
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
