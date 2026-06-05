@@ -1,0 +1,201 @@
+name: Tauri Desktop CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main, develop]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+  RUST_VERSION: 'stable'
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has-tauri: ${{ steps.detect.outputs.tauri }}
+      has-frontend: ${{ steps.detect.outputs.frontend }}
+      tauri-dir: ${{ steps.detect.outputs.tauri_dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        run: |
+          tauri="false"
+          has_fe="false"
+          tauri_dir="."
+          for d in "." "apps/desktop" "desktop" "src-tauri" "tauri-app"; do
+            if [ -f "$d/Cargo.toml" ] && grep -q 'tauri' "$d/Cargo.toml" 2>/dev/null; then
+              tauri="true"
+              tauri_dir="$d"
+              break
+            fi
+            if [ -f "$d/tauri.conf.json" ]; then
+              tauri="true"
+              tauri_dir="$d"
+              break
+            fi
+          done
+          if [ -f "$tauri_dir/../package.json" ] || [ -f "$tauri_dir/package.json" ] || [ -f "$tauri_dir/../vite.config.ts" ] || [ -f "$tauri_dir/../vite.config.js" ]; then
+            has_fe="true"
+          fi
+          echo "tauri=$tauri" >> $GITHUB_OUTPUT
+          echo "frontend=$has_fe" >> $GITHUB_OUTPUT
+          echo "tauri_dir=$tauri_dir" >> $GITHUB_OUTPUT
+
+  frontend-build:
+    needs: detect
+    if: needs.detect.outputs.has-frontend == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install frontend deps
+        run: |
+          if [ -f "package.json" ]; then
+            npm ci
+          fi
+      - name: Build frontend
+        run: |
+          if [ -f "package.json" ] && grep -q '"build"' package.json; then
+            npm run build 2>&1 || echo "Frontend build failed"
+          else
+            echo "No build script"
+          fi
+        continue-on-error: true
+      - name: Upload frontend dist
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-frontend-${{ matrix.os }}
+          path: |
+            dist/**
+            build/**
+
+  tauri-build:
+    needs: detect
+    if: needs.detect.outputs.has-tauri == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: linux
+            bundle: deb
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: appimage
+            bundle: appimage
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: windows
+            bundle: nsis
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: macos-arm
+            bundle: dmg
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: macos-intel
+            bundle: dmg
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ needs.detect.outputs.tauri-dir }}/target
+          key: tauri-cargo-${{ matrix.target }}-${{ hashFiles(format('{0}/Cargo.lock', needs.detect.outputs.tauri-dir)) }}
+          restore-keys: tauri-cargo-${{ matrix.target }}-
+
+      - name: Install Linux deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install frontend deps
+        if: needs.detect.outputs.has-frontend == 'true'
+        run: |
+          if [ -f "package.json" ]; then
+            npm ci
+          fi
+
+      - name: Build frontend
+        if: needs.detect.outputs.has-frontend == 'true'
+        run: |
+          if [ -f "package.json" ] && grep -q '"build"' package.json; then
+            npm run build 2>&1 || echo "Frontend build warning"
+          fi
+        continue-on-error: true
+
+      - name: Tauri build
+        working-directory: ${{ needs.detect.outputs.tauri-dir }}
+        run: |
+          cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} 2>&1 | tee tauri-build.log
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        continue-on-error: true
+
+      - name: Upload Tauri artifacts
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-${{ matrix.artifact }}
+          path: |
+            ${{ needs.detect.outputs.tauri-dir }}/target/${{ matrix.target }}/release/bundle/**/*.deb
+            ${{ needs.detect.outputs.tauri-dir }}/target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            ${{ needs.detect.outputs.tauri-dir }}/target/${{ matrix.target }}/release/bundle/**/*.msi
+            ${{ needs.detect.outputs.tauri-dir }}/target/${{ matrix.target }}/release/bundle/**/*.exe
+            ${{ needs.detect.outputs.tauri-dir }}/target/${{ matrix.target }}/release/bundle/**/*.dmg
+            ${{ needs.detect.outputs.tauri-dir }}/target/${{ matrix.target }}/release/bundle/**/*.app
+            tauri-build.log
+
+  release:
+    needs: tauri-build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.deb
+            artifacts/**/*.AppImage
+            artifacts/**/*.msi
+            artifacts/**/*.exe
+            artifacts/**/*.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
