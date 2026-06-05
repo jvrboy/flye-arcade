@@ -1,0 +1,379 @@
+name: Cross-Platform CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main, develop]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+  JAVA_VERSION: '17'
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      platform: ${{ steps.detect.outputs.platform }}
+      has-android: ${{ steps.detect.outputs.has_android }}
+      has-ios: ${{ steps.detect.outputs.has_ios }}
+      has-windows: ${{ steps.detect.outputs.has_windows }}
+      has-electron: ${{ steps.detect.outputs.has_electron }}
+      has-tauri: ${{ steps.detect.outputs.has_tauri }}
+      has-pubspec: ${{ steps.detect.outputs.has_pubspec }}
+      has-capacitor: ${{ steps.detect.outputs.has_capacitor }}
+      has-expo: ${{ steps.detect.outputs.has_expo }}
+      has-package: ${{ steps.detect.outputs.has_package }}
+      app-dir: ${{ steps.detect.outputs.appdir }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        run: |
+          platform="unknown"
+          has_android="false"
+          has_ios="false"
+          has_windows="false"
+          has_electron="false"
+          has_tauri="false"
+          has_pubspec="false"
+          has_capacitor="false"
+          has_expo="false"
+          has_package="false"
+          appdir="."
+
+          # Determine primary platform
+          if [ -f pubspec.yaml ]; then
+            platform="flutter"
+            has_pubspec="true"
+          elif [ -f capacitor.config.ts ] || [ -f capacitor.config.json ]; then
+            platform="capacitor"
+            has_capacitor="true"
+          elif [ -f electron/package.json ]; then
+            platform="electron"
+            has_electron="true"
+          elif [ -d electron ] && [ -f electron/package.json ]; then
+            has_electron="true"
+            platform="electron"
+          elif [ -f tauri.conf.json ] || find . -maxdepth 3 -name "tauri.conf.json" 2>/dev/null | head -1 | grep -q .; then
+            platform="tauri"
+            has_tauri="true"
+          elif [ -f app.json ] && grep -q '"expo"' app.json 2>/dev/null; then
+            platform="expo"
+            has_expo="true"
+          elif [ -f package.json ]; then
+            platform="nodejs"
+            has_package="true"
+            if grep -q '"react-native"' package.json 2>/dev/null; then
+              platform="react-native"
+            fi
+            if grep -q '"electron"' package.json 2>/dev/null; then
+              has_electron="true"
+              platform="electron"
+            fi
+          fi
+
+          # Detect sub-app directories (monorepo)
+          for d in "app" "apps/native" "apps/mobile" "mobile" "native" "forex_app"; do
+            if [ -f "$d/pubspec.yaml" ]; then
+              platform="flutter"
+              has_pubspec="true"
+              appdir="$d"
+              break
+            fi
+          done
+          for d in "apps/desktop" "desktop" "src-tauri"; do
+            if [ -f "$d/tauri.conf.json" ]; then
+              has_tauri="true"
+              [ "$platform" = "unknown" ] && platform="tauri"
+              break
+            fi
+          done
+
+          # Detect native sub-dirs
+          [ -d android ] && has_android="true"
+          [ -d ios ] && has_ios="true"
+          if [ -d "$appdir/android" ]; then has_android="true"; fi
+          if [ -d "$appdir/ios" ]; then has_ios="true"; fi
+          [ -f package.json ] && has_package="true"
+
+          # Detect Windows targets
+          ls *.sln &> /dev/null && has_windows="true"
+          ls windows-app/*.sln &> /dev/null && has_windows="true"
+
+          echo "platform=$platform" >> $GITHUB_OUTPUT
+          echo "has_android=$has_android" >> $GITHUB_OUTPUT
+          echo "has_ios=$has_ios" >> $GITHUB_OUTPUT
+          echo "has_windows=$has_windows" >> $GITHUB_OUTPUT
+          echo "has_electron=$has_electron" >> $GITHUB_OUTPUT
+          echo "has_tauri=$has_tauri" >> $GITHUB_OUTPUT
+          echo "has_pubspec=$has_pubspec" >> $GITHUB_OUTPUT
+          echo "has_capacitor=$has_capacitor" >> $GITHUB_OUTPUT
+          echo "has_expo=$has_expo" >> $GITHUB_OUTPUT
+          echo "has_package=$has_package" >> $GITHUB_OUTPUT
+          echo "appdir=$appdir" >> $GITHUB_OUTPUT
+
+  lint:
+    needs: detect
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - name: Install dependencies
+        if: needs.detect.outputs.has-package == 'true'
+        run: npm ci
+      - name: Run linter
+        run: |
+          if grep -q '"lint"' package.json 2>/dev/null; then
+            npm run lint 2>&1 | tee lint.log
+          else
+            npx eslint . --max-warnings 0 --ignore-path .gitignore 2>/dev/null || echo "No lint script"
+          fi
+        continue-on-error: true
+
+  test:
+    needs: detect
+    if: needs.detect.outputs.has-package == 'true' || needs.detect.outputs.has-pubspec == 'true'
+    strategy:
+      matrix:
+        node-version: ['18', '20', '22']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: |
+          if grep -q '"test"' package.json 2>/dev/null; then
+            npm test -- --watchAll=false 2>&1 | tee test.log
+          else
+            echo "No test script"
+          fi
+        continue-on-error: true
+      - name: Upload coverage
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-node-${{ matrix.node-version }}
+          path: |
+            coverage/**
+            test.log
+
+  android:
+    needs: detect
+    if: needs.detect.outputs.has-android == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        api-level: [24, 29, 34]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-cp-${{ hashFiles('**/*.gradle*') }}
+          restore-keys: gradle-cp-
+      - name: Sync Capacitor (if applicable)
+        if: needs.detect.outputs.has-capacitor == 'true'
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+            npm run build
+            npx cap sync android 2>&1 | tee cap-sync.log
+          fi
+        continue-on-error: true
+      - name: Build debug APK
+        run: |
+          if [ -d android ]; then
+            cd android && ./gradlew assembleDebug -PminSdkVersion=${{ matrix.api-level }} 2>&1 | tee android-build.log
+          fi
+        continue-on-error: true
+      - name: Upload APK
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp-android-apk-api-${{ matrix.api-level }}
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
+            android/*/build/outputs/apk/debug/*.apk
+            android-build.log
+            cap-sync.log
+
+  ios:
+    needs: detect
+    if: needs.detect.outputs.has-ios == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/Pods
+            ios/App/Pods
+            ~/Library/Caches/CocoaPods
+          key: pods-cp-${{ hashFiles('**/Podfile.lock') }}
+          restore-keys: pods-cp-
+      - name: Install web deps & sync (Capacitor)
+        if: needs.detect.outputs.has-capacitor == 'true'
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+            npm run build
+            npx cap sync ios 2>&1 | tee cap-sync.log
+          fi
+        continue-on-error: true
+      - name: Install pods
+        run: |
+          if [ -f ios/Podfile ]; then
+            cd ios && pod install 2>&1 | tee -a cap-sync.log
+          elif [ -f ios/App/Podfile ]; then
+            cd ios/App && pod install 2>&1 | tee -a cap-sync.log
+          fi
+        continue-on-error: true
+      - name: Build for simulator
+        run: |
+          if ls ios/*.xcworkspace &> /dev/null; then
+            xcodebuild build \
+              -workspace ios/*.xcworkspace \
+              -scheme $(xcodebuild -workspace ios/*.xcworkspace -list | sed -n '2p') \
+              -destination 'platform=iOS Simulator,name=iPhone 15' \
+              -sdk iphonesimulator \
+              -configuration Debug 2>&1 | tee sim-build.log
+          elif ls ios/App/*.xcworkspace &> /dev/null; then
+            xcodebuild build \
+              -workspace ios/App/*.xcworkspace \
+              -scheme $(xcodebuild -workspace ios/App/*.xcworkspace -list | sed -n '2p') \
+              -destination 'platform=iOS Simulator,name=iPhone 15' \
+              -sdk iphonesimulator \
+              -configuration Debug 2>&1 | tee sim-build.log
+          fi
+        continue-on-error: true
+      - name: Build device archive
+        run: |
+          mkdir -p build
+          if ls ios/*.xcworkspace &> /dev/null; then
+            xcodebuild archive \
+              -workspace ios/*.xcworkspace \
+              -scheme $(xcodebuild -workspace ios/*.xcworkspace -list | sed -n '2p') \
+              -destination 'generic/platform=iOS' \
+              -configuration Release \
+              -archivePath build/App \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              AD_HOC_CODE_SIGNING_ALLOWED=YES 2>&1 | tee -a sim-build.log
+          fi
+        continue-on-error: true
+      - name: Create unsigned IPA
+        run: |
+          if [ -d build/App.xcarchive ]; then
+            APP_PATH="build/App.xcarchive/Products/Applications"
+            APP_NAME=$(ls "$APP_PATH" 2>/dev/null | head -1)
+            if [ -n "$APP_NAME" ] && [ -d "$APP_PATH/$APP_NAME" ]; then
+              mkdir -p Payload
+              cp -R "$APP_PATH/$APP_NAME" Payload/
+              /usr/bin/codesign --force --sign - --timestamp=none Payload/"$APP_NAME" 2>&1 || true
+              zip -r -q "${APP_NAME%.app}-unsigned.ipa" Payload
+              mkdir -p build/ipa-output
+              mv "${APP_NAME%.app}-unsigned.ipa" build/ipa-output/
+              rm -rf Payload
+            fi
+          fi
+        continue-on-error: true
+      - name: Upload IPA
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp-ios-ipa
+        path: |
+          build/ipa-output/*.ipa
+          sim-build.log
+          cap-sync.log
+
+  windows-electron:
+    needs: detect
+    if: needs.detect.outputs.has-electron == 'true' || needs.detect.outputs.has_windows == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - name: Install dependencies
+        run: |
+          if (Test-Path package.json) { npm ci }
+          if (Test-Path electron/package.json) { Push-Location electron; npm ci; Pop-Location }
+        shell: pwsh
+      - name: Build web
+        run: |
+          if (Select-String -Path package.json -Pattern '"build"' -Quiet) {
+            npm run build 2>&1 | Tee-Object build.log
+          }
+        shell: pwsh
+        continue-on-error: true
+      - name: Build Windows installer
+        run: |
+          if (Test-Path electron) {
+            Push-Location electron
+            npx electron-builder --win --x64 --publish never 2>&1 | Tee-Object electron-build.log
+            Pop-Location
+          } else {
+            npx electron-builder --win --x64 --publish never 2>&1 | Tee-Object electron-build.log
+          }
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+      - name: Upload Windows artifacts
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp-windows-electron
+          path: |
+            electron/release/*.exe
+            electron/release/*.msi
+            release/*.exe
+            release/*.msi
+            electron-build.log
+
+  release:
+    needs: [android, ios, windows-electron]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.apk
+            artifacts/**/*.ipa
+            artifacts/**/*.exe
+            artifacts/**/*.msi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
