@@ -25,6 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: detect
+        shell: bash
         run: |
           expo="false"
           eas="false"
@@ -157,6 +158,7 @@ jobs:
       - name: Build with Gradle directly
         if: hashFiles(format('{0}/android/app/build.gradle', needs.detect.outputs.app-dir)) != ''
         working-directory: ${{ needs.detect.outputs.app-dir }}
+        shell: bash
         run: |
           if [ -d android ]; then
             cd android && ./gradlew assembleRelease -x lint 2>&1 | tee -a expo-android.log || true
@@ -192,6 +194,7 @@ jobs:
         continue-on-error: true
       - name: Install CocoaPods
         working-directory: ${{ needs.detect.outputs.app-dir }}
+        shell: bash
         run: |
           if [ -d ios ]; then
             cd ios && pod install 2>&1 | tee -a prebuild-ios.log
