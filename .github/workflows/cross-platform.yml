@@ -317,14 +317,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cp-ios-ipa
-        path: |
-          build/ipa-output/*.ipa
-          sim-build.log
-          cap-sync.log
+          path: |
+            build/ipa-output/*.ipa
+            sim-build.log
+            cap-sync.log
 
   windows-electron:
     needs: detect
-    if: needs.detect.outputs.has-electron == 'true' || needs.detect.outputs.has_windows == 'true'
+    if: needs.detect.outputs.has-electron == 'true' || needs.detect.outputs.has-windows == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
