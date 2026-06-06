@@ -26,7 +26,6 @@ jobs:
       - uses: actions/checkout@v4
       - id: detect
         shell: bash
-        shell: bash
         run: |
           tauri="false"
           has_fe="false"
@@ -66,13 +65,11 @@ jobs:
           cache: npm
       - name: Install frontend deps
         shell: bash
-        shell: bash
         run: |
           if [ -f "package.json" ]; then
             npm ci
           fi
       - name: Build frontend
-        shell: bash
         shell: bash
         run: |
           if [ -f "package.json" ] && grep -q '"build"' package.json; then
@@ -145,14 +142,12 @@ jobs:
       - name: Install Linux deps
         if: matrix.os == 'ubuntu-latest'
         shell: bash
-        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: Install frontend deps
         if: needs.detect.outputs.has-frontend == 'true'
-        shell: bash
         shell: bash
         run: |
           if [ -f "package.json" ]; then
@@ -162,7 +157,6 @@ jobs:
       - name: Build frontend
         if: needs.detect.outputs.has-frontend == 'true'
         shell: bash
-        shell: bash
         run: |
           if [ -f "package.json" ] && grep -q '"build"' package.json; then
             npm run build 2>&1 || echo "Frontend build warning"
@@ -171,7 +165,6 @@ jobs:
 
       - name: Tauri build
         working-directory: ${{ needs.detect.outputs.tauri-dir }}
-        shell: bash
         shell: bash
         run: |
           cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} 2>&1 | tee tauri-build.log

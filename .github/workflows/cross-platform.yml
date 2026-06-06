@@ -333,13 +333,11 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
       - name: Install dependencies
-        shell: bash
         run: |
           if (Test-Path package.json) { npm ci }
           if (Test-Path electron/package.json) { Push-Location electron; npm ci; Pop-Location }
         shell: pwsh
       - name: Build web
-        shell: bash
         run: |
           if (Select-String -Path package.json -Pattern '"build"' -Quiet) {
             npm run build 2>&1 | Tee-Object build.log
@@ -347,7 +345,6 @@ jobs:
         shell: pwsh
         continue-on-error: true
       - name: Build Windows installer
-        shell: bash
         run: |
           if (Test-Path electron) {
             Push-Location electron
